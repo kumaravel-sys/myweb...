@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VSE Stock Trainer</title>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+body { font-family: Arial, sans-serif; background: #f5f7fb; margin:0; padding:0;}
+#loginDiv, #dashboard { max-width: 900px; margin:auto; padding:20px; }
+input, button { padding:10px; margin:5px 0; width:100%; }
+#stockList { max-height:200px; overflow-y:auto; border:1px solid #ccc; margin-bottom:10px;}
+table { width:100%; border-collapse: collapse;}
+th, td { border:1px solid #ccc; padding:5px; text-align:center; }
+#chartContainer { width:100%; height:400px; margin-top:20px; }
+.hidden { display:none; }
+</style>
+</head>
+<body>
+
+<div id="loginDiv">
+    <h2>VSE Stock Trainer Login</h2>
+    <input type="email" id="email" placeholder="Email">
+    <input type="password" id="password" placeholder="Password">
+    <button id="loginBtn">Login</button>
+    <p id="loginMsg" style="color:red;"></p>
+</div>
+
+<div id="dashboard" class="hidden">
+    <h2>Welcome, <span id="userEmail"></span></h2>
+    <p>Balance: ₹<span id="balance">100000</span></p>
+    <input type="text" id="searchStock" placeholder="Search NSE Stock (e.g., TCS)">
+    <div id="stockList"></div>
+    <button id="buyBtn">Buy Selected Stock</button>
+    <button id="sellBtn">Sell Selected Stock</button>
+    
+    <h3>Transactions</h3>
+    <table id="txnTable">
+        <thead>
+            <tr><th>Stock</th><th>Type</th><th>Price</th><th>Qty</th><th>Status</th></tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+
+    <h3>Watchlist</h3>
+    <div id="watchlist"></div>
+
+    <h3>Live Chart</h3>
+    <div id="chartContainer">
+        <canvas id="stockChart"></canvas>
+    </div>
+
+    <h3>Top Gainers</h3>
+    <div id="gainers"></div>
+</div>
+
+<script>
+// ===== Firebase Setup =====
+const firebaseConfig = {
+    apiKey: "AIzaSyDr_yQFo5DGNIBpAfOezVYyMd-wtiDwN9c",
+    authDomain: "myweb-cd0a2.firebaseapp.com",
+    projectId: "myweb-cd0a2",
+    storageBucket: "myweb-cd0a2.appspot.com",
+    messagingSenderId: "1234567890",
+    appId: "1:1234567890:web:abcdef"
+};
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
+
+// ===== Admin Credentials =====
+const ADMIN_EMAIL = "admin@vse.com";
+const ADMIN_PASSWORD = "adminvse2k25";
+
+// ===== Twelve Data API Key =====
+const TWELVE_API_KEY = "c933f15065e54a7b9d8908b084d72de1"; // Replace with your key
+
+// ===== Login =====
+const loginDiv = document.getElementById('loginDiv');
+const dashboard = document.getElementById('dashboard');
+const loginBtn = document.getElementById('loginBtn');
+const loginMsg = document.getElementById('loginMsg');
+
+loginBtn.addEventListener('click', async ()=>{
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
+    try {
+        if(email===ADMIN_EMAIL && password===ADMIN_PASSWORD){
+            dashboard.classList.remove('hidden');
+            loginDiv.classList.add('hidden');
+            initDashboard(ADMIN_EMAIL, true);
+        } else {
+            await auth.signInWithEmailAndPassword(email, password);
+            dashboard.classList.remove('hidden');
+            loginDiv.classList.add('hidden');
+            initDashboard(email, false);
+        }
+    } catch(e){
+        loginMsg.textContent = "Login failed. Check email/password.";
+    }
+});
+
+// ===== Dashboard =====
+let balance = 100000;
+let selectedStock = null;
+let chartData = [];
+let chart = null;
+let marketOpen = false;
+
+function initDashboard(email, isAdmin=false){
+    document.getElementById('userEmail').textContent = email;
+    loadTransactions(email);
+    loadWatchlist(email);
+    checkMarketOpen();
+    loadGainers();
+
+    // Chart setup
+    const ctx = document.getElementById('stockChart').getContext('2d');
+    chart = new Chart(ctx, {
+        type: 'line',
+        data: { labels: [], datasets:[{ label:'Price', data:[], borderColor:'blue', tension:0.1 }]},
+        options: { animation:false, responsive:true, scales:{x:{title:{display:true, text:'Time'}},y:{title:{display:true,text:'Price'}}} }
+    });
+
+    document.getElementById('searchStock').addEventListener('input', searchStock);
+    document.getElementById('buyBtn').addEventListener('click', ()=>placeOrder('buy', email));
+    document.getElementById('sellBtn').addEventListener('click', ()=>placeOrder('sell', email));
+}
+
+// ===== Market Open Check =====
+function checkMarketOpen(){
+    setInterval(()=>{
+        const now = new Date();
+        const istTime = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Kolkata"}));
+        const hrs = istTime.getHours();
+        const mins = istTime.getMinutes();
+        marketOpen = (hrs>9 || (hrs===9 && mins>=15)) && (hrs<15 || (hrs===15 && mins<=30));
+    },60000);
+}
+
+// ===== Stock Search =====
+async function searchStock(){
+    const query = document.getElementById('searchStock').value.toUpperCase();
+    if(query.length<1) return;
+    const stockListDiv = document.getElementById('stockList');
+    stockListDiv.innerHTML = "";
+    const nseStocks = ['TCS','INFY','RELIANCE','HDFC','ICICIBANK','SBIN','MARUTI','LT','AXISBANK','BAJAJ-AUTO'];
+    const filtered = nseStocks.filter(s=>s.includes(query));
+    filtered.forEach(stock=>{
+        const btn = document.createElement('button');
+        btn.textContent = stock;
+        btn.style.margin='2px';
+        btn.addEventListener('click', ()=>selectStock(stock));
+        stockListDiv.appendChild(btn);
+    });
+}
+
+// ===== Select Stock =====
+function selectStock(stock){
+    selectedStock = stock;
+    chartData = [];
+    updateChart();
+    startLiveUpdate(stock);
+}
+
+// ===== Twelve Data API Fetch =====
+async function getStockPrice(symbol){
+    try{
+        const url = `https://api.twelvedata.com/quote?symbol=${symbol}.BSE&apikey=${TWELVE_API_KEY}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        return parseFloat(data.close);
+    } catch(e){
+        console.error(e);
+        return null;
+    }
+}
+
+// ===== Live Chart =====
+let liveInterval = null;
+function startLiveUpdate(symbol){
+    if(liveInterval) clearInterval(liveInterval);
+    liveInterval = setInterval(async ()=>{
+        if(!symbol) return;
+        const price = await getStockPrice(symbol);
+        if(price!==null){
+            const now = new Date().toLocaleTimeString();
+            chartData.push({time:now, price});
+            if(chartData.length>20) chartData.shift();
+            updateChart();
+        }
+    },2000);
+}
+
+function updateChart(){
+    chart.data.labels = chartData.map(d=>d.time);
+    chart.data.datasets[0].data = chartData.map(d=>d.price);
+    chart.update();
+}
+
+// ===== Place Order =====
+async function placeOrder(type, email){
+    if(!selectedStock) return alert('Select a stock first');
+    const price = await getStockPrice(selectedStock);
+    if(price===null) return alert('Failed to fetch price');
+    const qty = 1;
+    let status = marketOpen ? 'Executed' : 'Pending';
+    balance = type==='buy'? balance-price*qty : balance+price*qty;
+    document.getElementById('balance').textContent = balance;
+    const txn = {user:email, stock:selectedStock, type, price, qty, status, time:new Date()};
+    await db.collection('transactions').add(txn);
+    loadTransactions(email);
+    updateWatchlist(email, selectedStock);
+}
+
+// ===== Transactions =====
+async function loadTransactions(email){
+    const tbody = document.querySelector('#txnTable tbody');
+    tbody.innerHTML="";
+    const snapshot = await db.collection('transactions').where('user','==',email).get();
+    snapshot.forEach(doc=>{
+        const t = doc.data();
+        tbody.innerHTML += `<tr><td>${t.stock}</td><td>${t.type}</td><td>${t.price}</td><td>${t.qty}</td><td>${t.status}</td></tr>`;
+    });
+}
+
+// ===== Watchlist =====
+async function updateWatchlist(email, stock){
+    await db.collection('watchlist').doc(email).set({stocks: firebase.firestore.FieldValue.arrayUnion(stock)}, {merge:true});
+    loadWatchlist(email);
+}
+async function loadWatchlist(email){
+    const div = document.getElementById('watchlist');
+    const docSnap = await db.collection('watchlist').doc(email).get();
+    div.innerHTML = docSnap.exists ? docSnap.data().stocks.join(', ') : 'No stocks in watchlist';
+}
+
+// ===== Top Gainers =====
+function loadGainers(){
+    const gainersDiv = document.getElementById('gainers');
+    const topGainers = ['TCS +2.3%','INFY +1.8%','RELIANCE +1.5%'];
+    gainersDiv.innerHTML = topGainers.join('<br>');
+}
+</script>
+
+</body>
+</html>
